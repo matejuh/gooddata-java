@@ -7,9 +7,12 @@ package com.gooddata;
 
 import static com.gooddata.util.Validate.notNull;
 import static java.lang.String.format;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.awaitility.Awaitility.with;
 import static org.springframework.http.HttpMethod.GET;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.awaitility.core.ConditionTimeoutException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.client.ClientHttpResponse;
@@ -23,6 +26,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Parent for GoodData services providing helpers for REST API calls and polling.
@@ -50,25 +54,20 @@ public abstract class AbstractService {
 
     final <R> R poll(final PollHandler<?,R> handler, long timeout, final TimeUnit unit) {
         notNull(handler, "handler");
-        final long start = System.currentTimeMillis();
-        while (true) {
-            if (pollOnce(handler)) {
-                return handler.getResult();
-            }
-            if (unit != null && start + unit.toMillis(timeout) < System.currentTimeMillis()) {
-                throw new GoodDataException("timeout");
-            }
 
-            try {
-                Thread.sleep(WAIT_BEFORE_RETRY_IN_MILLIS);
-            } catch (InterruptedException e) {
-                throw new GoodDataException("interrupted");
-            }
+        try {
+            with().pollInterval(WAIT_BEFORE_RETRY_IN_MILLIS, MILLISECONDS).await().atMost(timeout, unit).until(
+                    () -> pollOnce(handler)
+            );
+        } catch (ConditionTimeoutException e) {
+            throw new GoodDataException("timeout");
         }
+        return handler.getResult();
     }
 
     final <P> boolean pollOnce(final PollHandler<P,?> handler) {
         notNull(handler, "handler");
+
         final ClientHttpResponse response;
         try {
             response = restTemplate.execute(handler.getPollingUri(), GET, null, reusableResponseExtractor);
@@ -76,7 +75,6 @@ public abstract class AbstractService {
             handler.handlePollException(e);
             throw new GoodDataException("Handler " + handler.getClass().getName() + " didn't handle exception", e);
         }
-
         try {
             if (handler.isFinished(response)) {
                 final P data = extractData(response, handler.getPollClass());
